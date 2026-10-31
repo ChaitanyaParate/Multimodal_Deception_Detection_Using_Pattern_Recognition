@@ -36,7 +36,7 @@ from model import DeceptionMLP
 # Falls back to a path relative to this script's location.
 DEFAULT_DATASET_ROOT = os.environ.get(
     "LIE_DETECTOR_DATA_ROOT",
-    str(Path(__file__).parent / "Real-life Deception Detection Dataset With Train Test"),
+    str(Path(__file__).resolve().parent / "Real-life Deception Detection Dataset With Train Test"),
 )
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 

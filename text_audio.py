@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 _WHISPER_WARNING_EMITTED = False
 _WHISPER_MODEL_CACHE: dict[tuple[str, str], Any] = {}
-_SENTENCE_MODEL = None
+_SENTENCE_MODEL: SentenceTransformer | None = None
 
 # Known deceptive vs. truthful anchor phrases used to compute a semantic deception score
 # via cosine similarity. These are embedded once and cached.

@@ -77,7 +77,7 @@ def main() -> None:
             "video_path is required. Example: python main.py /path/to/video.mp4 or python main.py --work-dir artifacts /path/to/video.mp4"
         )
 
-    video_path = inferred_video_path
+    video_path = inferred_video_path.resolve()
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
 

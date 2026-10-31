@@ -11,8 +11,10 @@ except ImportError:  # pragma: no cover - older MoviePy layouts
     from moviepy.video.io.VideoFileClip import VideoFileClip
 
 
-def ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+def ensure_dir(path: Path | str) -> Path:
+    p = Path(path)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def extract_audio(video_path: str, output_audio_path: str) -> str:

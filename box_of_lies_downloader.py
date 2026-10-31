@@ -28,6 +28,7 @@ import time
 from dataclasses import dataclass
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
+from typing import Any
 
 import ffmpeg
 from yt_dlp import YoutubeDL

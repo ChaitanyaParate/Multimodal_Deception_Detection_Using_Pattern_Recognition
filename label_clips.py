@@ -31,7 +31,7 @@ OUTPUT_DIR = Path("../DOLOS_videos")
 PROGRESS_FILE = Path("bol_labeling_progress.json")
 
 # Map video IDs to human-readable names
-VIDEO_INFO = {
+VIDEO_INFO: dict[str, str] = {
     "QhJIA8moL5s": "Jennifer Lawrence",
     "BvHCpWixZRA": "Taylor Swift",
     "LXG_-LGsAy8": "Jenna Ortega",
