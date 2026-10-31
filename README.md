@@ -27,40 +27,118 @@
 
 ---
 
+## 🧠 The Three Core Pattern Recognition Approaches
+
+To detect high-stakes interpersonal deception without overfitting on small multimodal datasets ($N=121$, $d=396$), this platform implements and benchmarks three foundational, mathematically grounded pattern recognition paradigms:
+
+| Approach | Core Mathematical Mechanism | Implemented Estimators (`pr_solutions.py`) | Best Holdout Acc / F1 | Best 5-Fold CV ROC-AUC |
+|---|---|:---:|:---:|:---:|
+| **Approach 1: Subspace Dimensionality Reduction (PCA + Fisher's LDA) with Generative Bayesian Classifiers (Gaussian Naive Bayes & QDA)** | Orthogonal subspace projection ($396 \to 22 \to 8\text{ dims}$) + Fisher's scatter ratio $J(w)$ + class-conditional Gaussian density estimation $p(x \mid \omega_i)$ | `Subspace-GaussianNB`, `Subspace-LDA`, `Subspace-RegQDA` | 58.3% / 0.286 | **0.746 ± 0.103** (`RegQDA`) |
+| **Approach 2: Early Feature-Level Fusion with Discriminative Margin (SVM-RBF / SVM-Linear) & Ensemble (Random Forest / Extra Trees) Classifiers** | Concatenated multimodal feature manifold ($d=22$) with maximum-margin hyperplanes, Mercer kernels, and randomized decision tree ensembles | `EarlyFusion-SVM-Linear`, `EarlyFusion-SVM-RBF`, `EarlyFusion-RandomForest`, `EarlyFusion-ExtraTrees`, `EarlyFusion-GradBoost` | **83.3% / 0.833** (`RF` & `ExtraTrees`) | **0.769 ± 0.120** (`ExtraTrees`) |
+| **Approach 3: Late Decision-Level Fusion via Stacked Generalization (Out-of-Fold Unimodal Posterior Meta-Classifier)** | Independent unimodal classifiers ($X_{\text{text}}, X_{\text{audio}}, X_{\text{vision}}$) + 5-fold out-of-fold posterior meta-learning & Bayesian Product of Experts | `LateFusion-StackingLR`, `LateFusion-SoftVoting`, `LateFusion-BayesianPoE` | **75.0% / 0.727** (`StackingLR`) | **0.670 ± 0.101** (`SoftVoting`) |
+
+---
+
+### Approach 1: Subspace Dimensionality Reduction (PCA + Fisher's LDA) with Generative Bayesian Classifiers (Gaussian Naive Bayes & QDA)
+
+High-dimensional multimodal data with limited sample size ($d=396 \gg N_{\text{train}}=109$) inevitably causes the empirical covariance matrix $\hat{\Sigma}$ to become rank-deficient and singular ($\text{rank}(\hat{\Sigma}) \le 109 < 396$), leading to catastrophic numerical collapse in Gaussian density estimation. Approach 1 (`pr_pipeline.py` and `pr_solutions.py`) resolves this via orthogonal subspace projection and regularized generative modeling:
+
+1. **Orthogonal Subspace PCA Projection:**
+   In `MultimodalPreprocessor` ([`pr_pipeline.py`](pr_pipeline.py)), eigen-decomposition of the sample covariance matrix compresses the $384$-dimensional `all-MiniLM-L6-v2` dense semantic embeddings to $k=10$ orthogonal principal axes capturing the dominant linguistic variance while filtering out high-frequency noise:
+   $$\Sigma_x = \frac{1}{N-1}\sum_{i=1}^N (x_i - \bar{x})(x_i - \bar{x})^T = V \Lambda V^T \implies z_{\text{text}} = W_{\text{PCA}}^T (x_{\text{text}} - \bar{x}_{\text{text}}), \quad W_{\text{PCA}} \in \mathbb{R}^{384 \times 10}$$
+   Combining $10\text{d}$ text PCA components with 4 engineered lexical features, 3 acoustic features, and 5 ocular features yields a compact $22\text{-dimensional}$ space ($N/d \approx 5.5$), well within non-singular estimation bounds.
+
+2. **Fisher's Linear Discriminant Analysis (LDA) with Analytic Shrinkage:**
+   `Subspace-LDA` ([`pr_solutions.py`](pr_solutions.py)) projects the compact manifold onto a $1\text{D}$ discriminant line $w$ maximizing the Generalized Rayleigh Quotient (ratio of between-class scatter $S_B$ to within-class scatter $S_W$):
+   $$J(w) = \frac{w^T S_B w}{w^T S_W w}, \quad \text{where } S_B = (\mu_1 - \mu_0)(\mu_1 - \mu_0)^T, \quad S_W = \sum_{i=0}^1 \sum_{x \in \omega_i} (x - \mu_i)(x - \mu_i)^T$$
+   To guarantee numerical invertibility of $S_W$, Ledoit-Wolf analytic covariance shrinkage is applied:
+   $$\Sigma^* = (1 - \lambda)\hat{\Sigma} + \lambda \frac{\text{Tr}(\hat{\Sigma})}{p}I$$
+
+3. **Generative Bayes Decision Rule & Regularized QDA ($\alpha = 0.3$):**
+   Unlike LDA (which assumes identical covariance $\Sigma_0 = \Sigma_1$) or Gaussian Naive Bayes (which enforces strict diagonal independence $p(x \mid \omega_i) = \prod_j \mathcal{N}(x_j; \mu_{ij}, \sigma_{ij}^2)$), Regularized Quadratic Discriminant Analysis (`Subspace-RegQDA`) estimates class-specific quadratic boundaries while regularizing class covariance estimates toward an identity sphere to prevent overfitting:
+   $$\hat{\Sigma}_i(\alpha) = (1 - \alpha)\hat{\Sigma}_i + \alpha \sigma^2 I, \quad \hat{\omega} = \arg\max_{i \in \{0,1\}} \left[ \ln p(x \mid \omega_i) + \ln P(\omega_i) \right]$$
+   where log-likelihood is given by $\ln p(x \mid \omega_i) = -\frac{1}{2}\ln|\hat{\Sigma}_i(\alpha)| - \frac{1}{2}(x - \mu_i)^T \hat{\Sigma}_i(\alpha)^{-1}(x - \mu_i) - \frac{d}{2}\ln(2\pi)$.
+
+---
+
+### Approach 2: Early Feature-Level Fusion with Discriminative Margin (SVM-RBF / SVM-Linear) & Ensemble (Random Forest / Extra Trees) Classifiers
+
+In Approach 2 (`EarlyFusionDiscriminativeBenchmark` in [`pr_solutions.py`](pr_solutions.py)), normalized lexical ($14\text{d}$), acoustic ($3\text{d}$), and ocular ($5\text{d}$) features are concatenated into a joint $22\text{-dimensional}$ multimodal vector $x = [x_{\text{text}}^T, x_{\text{audio}}^T, x_{\text{vision}}^T]^T$. Early fusion enables discriminative estimators to discover cross-modal correlations—such as acoustic pitch tremors occurring concurrently with abnormal gaze saccades—directly at the representation layer:
+
+1. **Maximum-Margin Hyperplanes & Mercer Kernels (`SVM-Linear`, `SVM-RBF`):**
+   Support Vector Machines solve the primal convex quadratic optimization problem:
+   $$\min_{w, b, \xi} \frac{1}{2}\|w\|_2^2 + C \sum_{i=1}^N \xi_i \quad \text{s.t.} \quad y_i(w^T \phi(x_i) + b) \ge 1 - \xi_i, \quad \xi_i \ge 0$$
+   where non-linear boundaries are implicitly mapped to a reproducing kernel Hilbert space via the Gaussian Radial Basis Function (RBF) kernel:
+   $$K(x, x') = \exp\left(-\gamma \|x - x'\|_2^2\right)$$
+   Calibrated posterior probabilities are generated via Platt scaling ($P(\omega_{\text{lie}} \mid x) = \frac{1}{1 + \exp(A f(x) + B)}$). Linear SVM additionally provides direct feature attribution: the margin direction $w_j \cdot x_j$ powers the **Local Feature Attribution ("Why This Verdict?")** bar chart in [`app.py`](app.py).
+
+2. **Randomized Decision Tree Ensembles (`Random Forest`, `Extra Trees`, `Gradient Boosting`):**
+   - **Random Forest:** Constructs $B=200$ decorrelated decision trees using bootstrap aggregation (bagging) and random feature subspace sampling ($m = \sqrt{d}$), reducing estimator variance without increasing bias.
+   - **Extra Trees (Extremely Randomized Trees):** Further mitigates small-sample overfitting on $N=121$ by drawing random candidate split thresholds rather than searching for optimal cutoffs, achieving the top cross-validated ROC-AUC (**$0.769 \pm 0.120$**). Gini importance is accumulated across all nodes:
+     $$I_G(f) = \sum_{T} \sum_{t \in T: v(t)=f} \frac{N_t}{N} \Delta i(t)$$
+
+---
+
+### Approach 3: Late Decision-Level Fusion via Stacked Generalization (Out-of-Fold Unimodal Posterior Meta-Classifier)
+
+Rather than forcing disparate modalities into a single feature vector, Approach 3 (`LateFusionStackingClassifier` in [`pr_solutions.py`](pr_solutions.py)) trains three isolated Level-0 unimodal estimators on text ($X_{\text{text}} \in \mathbb{R}^{14}$), audio ($X_{\text{audio}} \in \mathbb{R}^3$), and vision ($X_{\text{vision}} \in \mathbb{R}^5$). This preserves individual modality geometries and isolates sensor noise (e.g., poor microphone acoustics or camera occlusions) from corrupting other clean streams:
+
+1. **Leakage-Free 5-Fold Out-of-Fold (OOF) Posterior Generation:**
+   To prevent data leakage when training the meta-classifier, the training partition is split into 5 stratified folds. For each fold $k$, unimodal models trained exclusively on the other 4 folds generate validation posterior predictions:
+   $$z_i = \left[ P(\omega_{\text{lie}} \mid x_{i,\text{text}}), \; P(\omega_{\text{lie}} \mid x_{i,\text{audio}}), \; P(\omega_{\text{lie}} \mid x_{i,\text{vision}}) \right]^T \in [0,1]^3$$
+
+2. **Level-1 Stacked Logistic Regression Meta-Classifier:**
+   A non-negative, calibrated meta-learner trains on the out-of-fold probability matrix $Z \in \mathbb{R}^{N \times 3}$ to learn optimal, data-driven modality weights:
+   $$P(\omega_{\text{lie}} \mid z) = \sigma\left(w_{\text{text}} p_{\text{text}} + w_{\text{audio}} p_{\text{audio}} + w_{\text{vision}} p_{\text{vision}} + b\right)$$
+   where $\sigma(u) = \frac{1}{1 + e^{-u}}$. This completely eliminates the legacy arbitrary `0.3 / 0.3 / 0.4` heuristic by discovering empirical weights where reliable nonverbal cues dominate ambiguous textual cues.
+
+3. **Bayesian Product of Experts (PoE):**
+   Under conditional independence across modalities given class $\omega$, the joint log-posterior odds equals the sum of unimodal log-odds:
+   $$\ln \frac{P(\omega_{\text{lie}} \mid X)}{P(\omega_{\text{truth}} \mid X)} = \sum_{m \in \{\text{text}, \text{audio}, \text{vision}\}} \ln \frac{p_m}{1 - p_m}$$
+   providing an exact, parameter-free generative consensus baseline.
+
+---
+
 ## 🏗️ System Architecture
 
 ```mermaid
 flowchart TD
-    subgraph Input ["1. Raw Multimodal Input"]
+    subgraph Input["1. Raw Multimodal Input"]
         V["Input Video (.mp4)"]
     end
 
-    subgraph FeatureExtraction ["2. Synchronous Feature Extraction"]
+    subgraph FeatureExtraction["2. Synchronous Feature Extraction"]
         V --> W["OpenAI Whisper ASR"]
         V --> L["Librosa Audio Engine (75-360 Hz PyIN)"]
         V --> M["MediaPipe FaceMesh (468 pts + CLAHE)"]
 
-        W --> T_FEAT["1. Text Stream\n- 384d MiniLM Embeddings\n- Hesitation Frequency\n- Semantic Cosine Similarity"]
-        L --> A_FEAT["2. Audio Stream\n- pyin Pitch Contour (F0 std)\n- RMS Silence Ratio\n- Voicing Energy"]
-        M --> V_FEAT["3. Vision Stream\n- Eye Aspect Ratio (EAR)\n- Blink Rate (/min)\n- Horizontal Saccade Std Dev"]
+        W --> T_FEAT["1. Text Stream<br/>• 384d MiniLM Embeddings<br/>• Hesitation Frequency<br/>• Semantic Similarity"]
+        L --> A_FEAT["2. Audio Stream<br/>• pyin Pitch Contour (F0 std)<br/>• RMS Silence Ratio<br/>• Voicing Energy"]
+        M --> V_FEAT["3. Vision Stream<br/>• Eye Aspect Ratio (EAR)<br/>• Blink Rate (/min)<br/>• Saccade Std Dev"]
     end
 
-    subgraph Subspace ["3. Leakage-Free Subspace Compression"]
+    subgraph Subspace["3. Leakage-Free Subspace Compression"]
         T_FEAT --> PCA_MOD["PCA Subspace (k=10)"]
-        PCA_MOD & A_FEAT & V_FEAT --> COMPACT["Compact 22-Dim Multimodal Vector\n(14 Text + 3 Audio + 5 Vision)"]
+        PCA_MOD --> COMPACT["Compact 22-Dim Multimodal Vector<br/>(14 Text + 3 Audio + 5 Vision)"]
+        A_FEAT --> COMPACT
+        V_FEAT --> COMPACT
     end
 
-    subgraph Models ["4. Pattern Recognition Model Registry (13 Models)"]
-        COMPACT --> FAM1["Subspace Generative Bayesian\n- GaussianNB\n- LDA (Shrinkage)\n- RegQDA (α=0.3)"]
-        COMPACT --> FAM2["Early Margin & Ensembles\n- SVM-Linear (Max-Margin)\n- SVM-RBF (Platt Scaled)\n- Random Forest\n- GradBoost\n- ExtraTrees (200 trees)"]
-        COMPACT --> FAM3["Late Decision Fusion\n- 5-Fold OOF Unimodal Estimators\n- Meta-Learner (Logistic Regression)\n- Bayesian Product of Experts\n- Soft-Voting"]
-        V_FEAT & A_FEAT & T_FEAT --> BASE["Baselines & Meta-Ensemble\n- Heuristic Weighted (0.3/0.3/0.4)\n- Deep DeceptionMLP (PyTorch)\n- ★ Ensemble Consensus"]
+    subgraph Models["4. Pattern Recognition Model Registry (13 Models)"]
+        COMPACT --> FAM1["Approach 1: Subspace Generative Bayesian<br/>• GaussianNB<br/>• LDA with Shrinkage<br/>• RegQDA (alpha=0.3)"]
+        COMPACT --> FAM2["Approach 2: Early Feature Fusion<br/>• SVM-Linear (Max-Margin)<br/>• SVM-RBF (Platt Scaled)<br/>• Random Forest & Extra Trees<br/>• Gradient Boosting"]
+        COMPACT --> FAM3["Approach 3: Late Stacked Decision Fusion<br/>• 5-Fold OOF Unimodal Estimators<br/>• Level-1 Logistic Regression Meta-Learner<br/>• Bayesian Product of Experts"]
+        COMPACT --> BASE["Baselines & Meta-Consensus<br/>• Heuristic Weighted (0.3 / 0.3 / 0.4)<br/>• Deep DeceptionMLP (PyTorch)<br/>• Ensemble Consensus"]
     end
 
-    subgraph Deliverables ["5. Visual Deliverables & Interfaces"]
-        FAM1 & FAM2 & FAM3 & BASE --> STUDIO["Interactive Streamlit Studio\n(app.py - <30ms Telemetry Cache)"]
-        FAM1 & FAM2 & FAM3 & BASE --> HUD["OpenCV Telemetry HUD Annotator\n(visualizer.py - 468pt Mesh + Sparkline)"]
-        FAM1 & FAM2 & FAM3 & BASE --> BENCH["Automated Benchmark Suite\n(benchmark.py - Dark Studio Palette)"]
+    subgraph Deliverables["5. Visual Deliverables & Interfaces"]
+        FAM1 --> APPS["Unified Model Inference Engine"]
+        FAM2 --> APPS
+        FAM3 --> APPS
+        BASE --> APPS
+        APPS --> STUDIO["Interactive Streamlit Studio<br/>(app.py - Sub-30ms Telemetry Cache)"]
+        APPS --> HUD["OpenCV Telemetry HUD Annotator<br/>(visualizer.py - 468pt Mesh + Sparkline)"]
+        APPS --> BENCH["Automated Benchmark Suite<br/>(benchmark.py - Dark Studio Palette)"]
     end
 ```
 
@@ -98,17 +176,17 @@ All models were evaluated using a **dual-protocol evaluation**:
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Heuristic-Weighted** | Baseline | 0.417 | 0.000 | 0.444 | $0.495 \pm 0.065$ | $0.225 \pm 0.083$ | $0.659 \pm 0.154$ |
 | **Deep-DeceptionMLP** | Deep Baseline | 0.500 | 0.667 | 0.694 | **$0.728 \pm 0.060$** | $0.721 \pm 0.058$ | **$0.777 \pm 0.070$** |
-| **Subspace-GaussianNB** | Subspace Generative | 0.417 | 0.000 | 0.222 | $0.546 \pm 0.033$ | $0.578 \pm 0.038$ | $0.612 \pm 0.069$ |
-| **Subspace-LDA** | Subspace Generative | 0.333 | 0.000 | 0.250 | $0.529 \pm 0.045$ | $0.543 \pm 0.045$ | $0.598 \pm 0.045$ |
-| **Subspace-RegQDA** | Subspace Generative | 0.583 | 0.286 | 0.528 | $0.671 \pm 0.104$ | $0.674 \pm 0.092$ | $0.746 \pm 0.103$ |
-| **EarlyFusion-SVM-Linear** | Margin / Ensemble | 0.750 | 0.727 | **0.889** | $0.693 \pm 0.092$ | $0.674 \pm 0.118$ | $0.678 \pm 0.107$ |
-| **EarlyFusion-SVM-RBF** | Margin / Ensemble | 0.500 | 0.000 | 0.389 | $0.687 \pm 0.073$ | $0.686 \pm 0.061$ | $0.758 \pm 0.059$ |
-| **EarlyFusion-RandomForest** | Margin / Ensemble | **0.833** | **0.833** | 0.833 | $0.701 \pm 0.091$ | $0.708 \pm 0.087$ | $0.745 \pm 0.104$ |
-| **EarlyFusion-GradBoost** | Margin / Ensemble | 0.750 | 0.769 | 0.750 | $0.635 \pm 0.065$ | $0.650 \pm 0.063$ | $0.688 \pm 0.099$ |
-| **EarlyFusion-ExtraTrees** | Margin / Ensemble | **0.833** | **0.833** | 0.833 | **$0.718 \pm 0.108$** | **$0.729 \pm 0.106$** | **$0.769 \pm 0.120$** |
-| **LateFusion-StackingLR** | Late Stacked Fusion | 0.750 | 0.727 | 0.722 | $0.610 \pm 0.138$ | $0.622 \pm 0.140$ | $0.626 \pm 0.149$ |
-| **LateFusion-SoftVoting** | Late Stacked Fusion | 0.667 | 0.600 | 0.750 | $0.677 \pm 0.074$ | $0.669 \pm 0.104$ | $0.670 \pm 0.101$ |
-| **LateFusion-BayesianPoE** | Late Stacked Fusion | 0.667 | 0.600 | 0.722 | $0.669 \pm 0.072$ | $0.657 \pm 0.104$ | $0.669 \pm 0.106$ |
+| **Subspace-GaussianNB** | Approach 1: Subspace Generative | 0.417 | 0.000 | 0.222 | $0.546 \pm 0.033$ | $0.578 \pm 0.038$ | $0.612 \pm 0.069$ |
+| **Subspace-LDA** | Approach 1: Subspace Generative | 0.333 | 0.000 | 0.250 | $0.529 \pm 0.045$ | $0.543 \pm 0.045$ | $0.598 \pm 0.045$ |
+| **Subspace-RegQDA** | Approach 1: Subspace Generative | 0.583 | 0.286 | 0.528 | $0.671 \pm 0.104$ | $0.674 \pm 0.092$ | $0.746 \pm 0.103$ |
+| **EarlyFusion-SVM-Linear** | Approach 2: Margin / Ensemble | 0.750 | 0.727 | **0.889** | $0.693 \pm 0.092$ | $0.674 \pm 0.118$ | $0.678 \pm 0.107$ |
+| **EarlyFusion-SVM-RBF** | Approach 2: Margin / Ensemble | 0.500 | 0.000 | 0.389 | $0.687 \pm 0.073$ | $0.686 \pm 0.061$ | $0.758 \pm 0.059$ |
+| **EarlyFusion-RandomForest** | Approach 2: Margin / Ensemble | **0.833** | **0.833** | 0.833 | $0.701 \pm 0.091$ | $0.708 \pm 0.087$ | $0.745 \pm 0.104$ |
+| **EarlyFusion-GradBoost** | Approach 2: Margin / Ensemble | 0.750 | 0.769 | 0.750 | $0.635 \pm 0.065$ | $0.650 \pm 0.063$ | $0.688 \pm 0.099$ |
+| **EarlyFusion-ExtraTrees** | Approach 2: Margin / Ensemble | **0.833** | **0.833** | 0.833 | **$0.718 \pm 0.108$** | **$0.729 \pm 0.106$** | **$0.769 \pm 0.120$** |
+| **LateFusion-StackingLR** | Approach 3: Late Stacked Fusion | 0.750 | 0.727 | 0.722 | $0.610 \pm 0.138$ | $0.622 \pm 0.140$ | $0.626 \pm 0.149$ |
+| **LateFusion-SoftVoting** | Approach 3: Late Stacked Fusion | 0.667 | 0.600 | 0.750 | $0.677 \pm 0.074$ | $0.669 \pm 0.104$ | $0.670 \pm 0.101$ |
+| **LateFusion-BayesianPoE** | Approach 3: Late Stacked Fusion | 0.667 | 0.600 | 0.722 | $0.669 \pm 0.072$ | $0.657 \pm 0.104$ | $0.669 \pm 0.106$ |
 | **★ Ensemble Consensus** | Meta-Consensus | **0.833** | **0.833** | **0.850** | **$0.735 \pm 0.055$** | **$0.732 \pm 0.058$** | **$0.782 \pm 0.062$** |
 
 ### Table 2: Modality Ablation Analysis (5-Fold Stratified CV, $N=121$)
@@ -182,8 +260,8 @@ All diagnostic plots are generated automatically at 300 DPI in `outputs/plots/` 
 ### 1. Installation
 Clone the repository and install dependencies in a virtual environment:
 ```bash
-git clone https://github.com/ChaitanyaParate/AI_Lie_Detector.git
-cd AI_Lie_Detector
+git clone https://github.com/ChaitanyaParate/Multimodal_Deception_Detection_Using_Pattern_Recognition.git
+cd Multimodal_Deception_Detection_Using_Pattern_Recognition
 
 # Create virtual environment
 python3 -m venv .venv
@@ -232,7 +310,7 @@ python train.py
 ## 📂 Repository Structure
 
 ```
-AI_Lie_Detector/
+Multimodal_Deception_Detection_Using_Pattern_Recognition/
 ├── app.py                     # Streamlit Multimodal Inspection Studio (Obsidian Theme)
 ├── visualizer.py              # OpenCV Telemetry HUD Video Visualizer (FaceMesh + EAR Sparkline)
 ├── benchmark.py               # Dual-protocol benchmark runner & dark-theme plot generator
