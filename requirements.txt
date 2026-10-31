@@ -5,7 +5,8 @@ openai-whisper>=20231117
 librosa>=0.10,<0.12
 
 # Vision / MediaPipe
-mediapipe>=0.10,<0.11
+mediapipe>=0.10.0,<=0.10.14
+protobuf<5,>=4.25.3
 opencv-python>=4.8
 
 # Video I/O
@@ -19,11 +20,12 @@ torchvision>=0.15
 scikit-learn>=1.3
 sentence-transformers>=2.2
 
-# Data utilities
+# Data utilities & Dashboard
 numpy>=1.24
 pandas>=2.0
 tqdm>=4.65
 joblib>=1.3
+streamlit>=1.39.0,<1.40.0
 
 # Image utilities
 Pillow>=10.0
@@ -31,3 +33,4 @@ albumentations>=1.3
 
 # Dataset download (optional)
 kaggle
+

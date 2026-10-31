@@ -1,4 +1,4 @@
-# Python
+# Python bytecode & cache
 __pycache__/
 *.py[cod]
 *.pyo
@@ -14,8 +14,11 @@ build/
 venv/
 env/
 
-# Large binary / data files — use Git LFS or keep locally
+# Large media & archive files
 *.zip
+*.tar.gz
+*.rar
+*.7z
 *.mp4
 *.mov
 *.avi
@@ -23,39 +26,51 @@ env/
 *.webm
 *.wav
 
-# Generated artifacts (re-created by running the pipeline)
-outputs/
-dataset_artifacts/
-inference_artifacts/
-artifacts/
-
-# Model checkpoints
-*.pt
-*.pth
-*.ckpt
-
-# Datasets & raw video downloads
+# Datasets & external clones
 bol_raw/
 DOLOS_videos/
 Real-life Deception Detection Dataset With Train Test/
-features_full.csv
-
-# External clones (not part of this project's source)
 AV-Data-Processing/
 DOLOS/
 Hikvision_Video_Downloader/
-
-# Labeling tool state
 bol_labeling_progress.json
+
+# Cache & intermediate artifacts
+dataset_artifacts/
+inference_artifacts/
+artifacts/
+scratch/
+outputs/telemetry_cache.joblib
+outputs/test_*.jpg
+outputs/test_*.png
+outputs/*.mp4
+outputs/*.avi
+outputs/*.mov
+outputs/*.mkv
+
+# Whitelist essential repository outputs, benchmark metrics, and plots for README
+!outputs/
+!outputs/plots/
+!outputs/plots/*.png
+!outputs/*.csv
+!outputs/*.json
+!outputs/trained_models.joblib
+!outputs/model_full.pt
+
+# Streamlit secrets (keep config.toml tracked, ignore secrets)
+.streamlit/secrets.toml
+
+# Checkpoints
+*.pth
+*.ckpt
 
 # Jupyter
 .ipynb_checkpoints/
 
-# OS
+# OS & IDE
 .DS_Store
 Thumbs.db
-
-# IDE
 .vscode/
 .idea/
 *.swp
+.streamlit/

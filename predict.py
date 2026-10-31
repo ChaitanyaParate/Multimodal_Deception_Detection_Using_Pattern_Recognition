@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Offline mode for huggingface to prevent timeout
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+import joblib
 import numpy as np
 import torch
 import torch.nn as nn
@@ -21,6 +27,7 @@ from text_audio import TextAudioResult, analyze_text_audio
 from utils import extract_audio, extract_frames
 from vision import analyze_vision
 from model import DeceptionMLP
+from pr_pipeline import ALL_FEATURE_COLS
 
 
 DEFAULT_FEATURE_COLS = [
@@ -40,9 +47,11 @@ DEFAULT_FEATURE_COLS = [
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Predict lie/truth on a single video using model_full.pt")
+    parser = argparse.ArgumentParser(description="Multi-Model Multimodal Deception Predictor")
     parser.add_argument("video_path", help="Path to input video")
-    parser.add_argument("--model-path", default="outputs/model_full.pt", help="Path to saved .pt model")
+    parser.add_argument("--model", default="all", help="Model to evaluate: 'all', 'EarlyFusion-SVM-Linear', 'LateFusion-BayesianPoE', 'Subspace-RegQDA', 'Deep-DeceptionMLP', 'Heuristic-Weighted', etc.")
+    parser.add_argument("--model-path", default="outputs/model_full.pt", help="Path to saved DeceptionMLP .pt model")
+    parser.add_argument("--registry-path", default="outputs/trained_models.joblib", help="Path to saved classical model registry")
     parser.add_argument("--work-dir", default="inference_artifacts", help="Directory to store extracted audio/frames")
     parser.add_argument("--whisper-model", default="tiny", help="Whisper model size")
     parser.add_argument("--whisper-device", default="auto", choices=["auto", "cpu", "cuda"], help="Whisper inference device")
@@ -55,8 +64,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def load_checkpoint(model_path: Path, device: torch.device) -> tuple[nn.Module, np.ndarray, np.ndarray, list[str]]:
-    # weights_only=False is required to load the full checkpoint dict (scaler stats, feature_cols, etc.)
-    # Safe here because we control the checkpoint file ourselves.
     checkpoint: dict[str, Any] = torch.load(model_path, map_location=device, weights_only=False)
 
     if "model_state_dict" not in checkpoint:
@@ -101,6 +108,16 @@ def extract_single_video_features(
 
     _, fps = extract_frames(str(video_path), str(frames_dir), frame_step=frame_step)
 
+    # Check transcript cache
+    cache_path = Path("outputs/transcripts_cache.json")
+    cached_transcript = None
+    if cache_path.exists():
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cached_transcript = json.load(f).get(video_path.name)
+        except Exception:
+            pass
+
     if has_audio:
         ta = analyze_text_audio(
             str(audio_path),
@@ -108,9 +125,11 @@ def extract_single_video_features(
             whisper_device=whisper_device,
             max_audio_seconds=max_audio_seconds,
         )
+        if cached_transcript and not ta.transcript:
+            ta.transcript = cached_transcript
     else:
         ta = TextAudioResult(
-            transcript="",
+            transcript=cached_transcript or "",
             hesitation_score=0.0,
             pitch_score=0.0,
             silence_score=0.0,
@@ -138,10 +157,10 @@ def extract_single_video_features(
         "has_transcript": float(has_transcript),
         "transcript": ta.transcript,
     }
-    
+
     for i, val in enumerate(ta.transcript_embedding):
         result[f"emb_{i}"] = float(val)
-        
+
     return result
 
 
@@ -150,17 +169,13 @@ def main() -> None:
 
     video_path = Path(args.video_path)
     model_path = Path(args.model_path)
+    registry_path = Path(args.registry_path)
     work_dir = Path(args.work_dir)
 
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model not found: {model_path}")
 
     work_dir.mkdir(parents=True, exist_ok=True)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, scaler_mean, scaler_scale, feature_cols = load_checkpoint(model_path, device)
 
     feats = extract_single_video_features(
         video_path=video_path,
@@ -172,26 +187,111 @@ def main() -> None:
         vision_max_frames=args.vision_max_frames,
     )
 
-    x = np.array([feats.get(col, 0.0) for col in feature_cols], dtype=np.float32)
-    safe_scale = np.where(scaler_scale == 0.0, 1.0, scaler_scale)
-    x_scaled = (x - scaler_mean) / safe_scale
+    all_predictions: dict[str, dict[str, Any]] = {}
 
-    with torch.no_grad():
-        logit = model(torch.from_numpy(x_scaled).unsqueeze(0).to(device)).item()
-    prob_lie = float(1.0 / (1.0 + np.exp(-logit)))
-    pred_label = int(prob_lie >= args.threshold)
+    # 1. Deep-DeceptionMLP Prediction
+    if model_path.exists():
+        try:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model, scaler_mean, scaler_scale, feature_cols = load_checkpoint(model_path, device)
+            x = np.array([feats.get(col, 0.0) for col in feature_cols], dtype=np.float32)
+            safe_scale = np.where(scaler_scale == 0.0, 1.0, scaler_scale)
+            x_scaled = (x - scaler_mean) / safe_scale
+            with torch.no_grad():
+                logit = model(torch.from_numpy(x_scaled).unsqueeze(0).to(device)).item()
+            prob_mlp = float(1.0 / (1.0 + np.exp(-logit)))
+            pred_mlp = int(prob_mlp >= args.threshold)
+            all_predictions["Deep-DeceptionMLP"] = {
+                "prob_deceptive": prob_mlp,
+                "verdict": "DECEPTIVE" if pred_mlp == 1 else "TRUTHFUL",
+            }
+        except Exception as e:
+            logger.warning("Could not run DeceptionMLP: %s", e)
+
+    # 2. Baseline Heuristic
+    ts = feats.get("text_score", 0.5)
+    as_ = feats.get("audio_score", 0.5)
+    vs = feats.get("vision_score", 0.5)
+    prob_heur = float(np.clip(0.3 * ts + 0.3 * as_ + 0.4 * vs, 0.0, 1.0))
+    all_predictions["Heuristic-Weighted"] = {
+        "prob_deceptive": prob_heur,
+        "verdict": "DECEPTIVE" if prob_heur >= args.threshold else "TRUTHFUL",
+    }
+
+    # 3. Classical Pattern Recognition Models from Registry
+    if registry_path.exists():
+        try:
+            artifact = joblib.load(registry_path)
+            prep = artifact["preprocessor"]
+            models = artifact["models"]
+            X_raw = np.array([feats.get(col, 0.0) for col in ALL_FEATURE_COLS], dtype=np.float32).reshape(1, -1)
+            X_compact = prep.transform(X_raw)
+
+            for name, entry in models.items():
+                clf = entry["model"]
+                mtype = entry.get("type")
+                if mtype == "late_soft":
+                    prob = float(clf.soft_vote_predict_proba(X_compact)[0, 1])
+                elif mtype == "late_poe":
+                    prob = float(clf.product_of_experts_predict_proba(X_compact)[0, 1])
+                elif hasattr(clf, "predict_proba"):
+                    sub_pca = entry.get("subspace_pca")
+                    if sub_pca is not None:
+                        X_sub = sub_pca.transform(X_compact)
+                        prob = float(clf.predict_proba(X_sub)[0, 1])
+                    else:
+                        prob = float(clf.predict_proba(X_compact)[0, 1])
+                else:
+                    prob = 0.50
+
+                prob = float(np.clip(prob, 0.0, 1.0))
+                all_predictions[name] = {
+                    "prob_deceptive": prob,
+                    "verdict": "DECEPTIVE" if prob >= args.threshold else "TRUTHFUL",
+                }
+        except Exception as e:
+            logger.warning("Could not evaluate classical model registry: %s", e)
+
+    # 4. Ensemble Consensus
+    top_models = [
+        "EarlyFusion-GradBoost",
+        "EarlyFusion-RandomForest",
+        "EarlyFusion-ExtraTrees",
+        "EarlyFusion-SVM-Linear",
+        "Subspace-RegQDA",
+        "LateFusion-BayesianPoE",
+        "Deep-DeceptionMLP",
+    ]
+    candidates = [all_predictions[m]["prob_deceptive"] for m in top_models if m in all_predictions]
+    if candidates:
+        ens_prob = float(np.mean(candidates))
+        all_predictions["★ ENSEMBLE CONSENSUS"] = {
+            "prob_deceptive": ens_prob,
+            "verdict": "DECEPTIVE" if ens_prob >= args.threshold else "TRUTHFUL",
+        }
+
+    # Filter by model if requested
+    target_model = args.model
+    if target_model in ["consensus", "ensemble", "Ensemble"]:
+        target_model = "★ ENSEMBLE CONSENSUS"
+
+    if target_model != "all" and target_model in all_predictions:
+        primary_pred = all_predictions[target_model]
+    else:
+        primary_pred = all_predictions.get("★ ENSEMBLE CONSENSUS", all_predictions.get("LateFusion-BayesianPoE", next(iter(all_predictions.values()))))
 
     result = {
         "video_path": str(video_path),
-        "model_path": str(model_path),
-        "prediction": {
-            "label_id": pred_label,
-            "label": "lie" if pred_label == 1 else "truth",
-            "prob_lie": prob_lie,
-            "threshold": float(args.threshold),
-        },
-        "features": {k: v for k, v in feats.items() if k != "transcript"},
+        "primary_model": target_model,
+        "prediction": primary_pred,
+        "multi_model_predictions": all_predictions,
         "transcript": feats.get("transcript", ""),
+        "modality_scores": {
+            "text": ts,
+            "audio": as_,
+            "vision": vs,
+        },
+        "features": {k: v for k, v in feats.items() if not k.startswith("emb_") and k != "transcript"},
     }
 
     if args.output_json:
@@ -199,7 +299,18 @@ def main() -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
-    print(json.dumps(result, indent=2))
+    # Print Formatted CLI Table
+    print("\n" + "=" * 76)
+    print(f"MULTIMODAL DECEPTION PREDICTIONS: {video_path.name}")
+    print("=" * 76)
+    print(f"{'Model Architecture':<30} {'Deception Prob.':<20} {'Verdict'}")
+    print("-" * 76)
+    for mname, pred in all_predictions.items():
+        prob_str = f"{pred['prob_deceptive'] * 100:.1f}%"
+        print(f"{mname:<30} {prob_str:<20} {pred['verdict']}")
+    print("=" * 76)
+    if feats.get("transcript"):
+        print(f"\nTranscript: \"{feats.get('transcript')}\"\n")
 
 
 if __name__ == "__main__":
