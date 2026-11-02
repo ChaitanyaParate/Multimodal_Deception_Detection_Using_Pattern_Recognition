@@ -39,7 +39,7 @@ To detect high-stakes interpersonal deception without overfitting on small multi
 
 ---
 
-### Approach 1: Subspace Dimensionality Reduction (PCA + Fisher's LDA) with Generative Bayesian Classifiers (Gaussian Naive Bayes & QDA)
+### Approach 1: Subspace Dimensionality Reduction (PCA + Fisher's LDA) with Generative Bayesian Classifiers (Gaussian Naive Bayes & QDA):
 
 High-dimensional multimodal data with limited sample size ($d=396 \gg N_{\text{train}}=109$) inevitably causes the empirical covariance matrix $\hat{\Sigma}$ to become rank-deficient and singular ($\text{rank}(\hat{\Sigma}) \le 109 < 396$), leading to catastrophic numerical collapse in Gaussian density estimation. Approach 1 (`pr_pipeline.py` and `pr_solutions.py`) resolves this via orthogonal subspace projection and regularized generative modeling:
 
